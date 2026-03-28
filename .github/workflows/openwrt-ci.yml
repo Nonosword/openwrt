@@ -38,9 +38,9 @@ on:
         required: false
       branch:
         description: 'select openwrt branch'
-        default: 'master'
+        default: 'openwrt-25.12'
         required: false
-
+  
 permissions:
   contents: read
 
@@ -76,6 +76,8 @@ jobs:
 
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'openwrt-25.12' }}
 
       - name: Update feeds
         run: |
