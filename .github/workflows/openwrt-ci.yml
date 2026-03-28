@@ -1,0 +1,187 @@
+# 
+# <https://github.com/KFERMercer/OpenWrt-CI>
+#
+# Copyright (C) 2019 P3TERX
+#
+# Copyright (C) 2020 KFERMercer
+#
+name: OpenWrt-CI
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      device:
+        type: choice
+        description: 'select device to build'
+        options:
+        - r4s
+        - x86_x64
+        default: 'r4s'
+        required: false
+      kernal:
+        type: choice
+        description: 'select kernal type'
+        options:
+        - regular_kernel
+        - testing_kernel
+        default: 'regular_kernel'
+        required: false
+      workchain:
+        type: choice
+        description: 'select work path'
+        options:
+        - Generic
+        - MainNet
+        - SubNet
+        default: 'MainNet'
+        required: false
+      branch:
+        description: 'select openwrt branch'
+        default: 'master'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+
+  build_openwrt:
+
+    name: Build ${{ github.event.inputs.device }}_${{ github.event.inputs.kernal }}
+    runs-on: ubuntu-22.04
+    env:
+      DEVICE: ${{ github.event.inputs.device }}
+      KERNAL: ${{ github.event.inputs.kernal }}
+      BRANCH: ${{ github.event.inputs.branch }}
+      WORKCHAIN: ${{ github.event.inputs.workchain }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Space cleanup and Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker image prune -f
+          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
+          sudo -E apt-mark hold grub-efi-amd64-signed
+          sudo -E apt update
+          sudo -E apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* dotnet* snap*
+          sudo -E apt -y full-upgrade
+          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E systemctl daemon-reload
+          sudo -E apt -y autoremove --purge
+          sudo -E apt clean
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+
+      - name: Update feeds
+        run: |
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/extra_feeds
+          cat extra_feeds >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Fetch library configuration 1
+        if: ${{ github.event.inputs.workchain == 'Generic' }}
+        run: |
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
+          cat device_$DEVICE > .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
+          cat config_generic >> .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
+          chmod +x ./patches_$WORKCHAIN.sh
+          ./patches_$WORKCHAIN.sh
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_patches_$DEVICE.sh
+          chmod +x ./device_patches_$DEVICE.sh
+          ./device_patches_$DEVICE.sh
+      - name: Fetch library configuration 2
+        if: ${{ github.event.inputs.workchain == 'MainNet' }}
+        run: |
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
+          cat device_$DEVICE > .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
+          cat config_generic >> .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
+          chmod +x ./patches_$WORKCHAIN.sh
+          ./patches_$WORKCHAIN.sh
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_patches_$DEVICE.sh
+          chmod +x ./device_patches_$DEVICE.sh
+          ./device_patches_$DEVICE.sh
+      - name: Fetch library configuration 3
+        if: ${{ github.event.inputs.workchain == 'SubNet' }}
+        run: |
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
+          cat device_$DEVICE > .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
+          cat config_subnet >> .config
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
+          chmod +x ./patches_$WORKCHAIN.sh
+          ./patches_$WORKCHAIN.sh
+          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_patches_$DEVICE.sh
+          chmod +x ./device_patches_$DEVICE.sh
+          ./device_patches_$DEVICE.sh
+
+      - name: Enable Testing Kernal
+        if: ${{ github.event.inputs.kernal == 'testing_kernel' }}
+        run: |
+            echo 'CONFIG_TESTING_KERNEL=y' >> .config
+
+      - name: Generate configuration file
+        run: |
+            sed -i 's/^[ \t]*//g' ./.config
+            cat .config
+            make defconfig
+
+      - name: Download packages
+        run: |
+            cat .config
+            make download -j16
+
+      - name: Compile firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+          echo "======================="
+          echo "Space usage:"
+          echo "======================="
+          df -h
+          echo "======================="
+          du -h --max-depth=1 ./ --exclude=build_dir --exclude=bin
+          du -h --max-depth=1 ./build_dir
+          du -h --max-depth=1 ./bin
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p ./artifact/package
+          mkdir -p ./artifact/buildinfo
+          rm -rf $(find ./bin/targets/ -type d -name "packages")
+          cp -rf $(find ./bin/packages/ -type f -name "*.ipk") ./artifact/package/
+          cp -rf $(find ./bin/targets/ -type f -name "*.buildinfo" -o -name "*.manifest") ./artifact/buildinfo/
+
+      - name: Get current date
+        run: echo "today=$(date +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Read kernel version
+        run: |
+          grep 'CONFIG_LINUX_' .config
+          echo "vKERNEL=$(grep 'CONFIG_LINUX_' .config | cut -d'_' -f 3,4 | cut -d'=' -f 1)" >> $GITHUB_ENV
+
+      - name: Upload buildinfo
+        uses: actions/upload-artifact@v4
+        with:
+          name: Buildinfo_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          path: ./artifact/buildinfo/
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Package_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          path: ./artifact/package/
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: Firmware_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          path: ./bin/targets/
