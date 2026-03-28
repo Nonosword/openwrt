@@ -77,8 +77,8 @@ jobs:
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch || 'openwrt-25.12' }}
-
+          ref: ${{ env.BRANCH }}
+  
       - name: Update feeds
         run: |
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/extra_feeds
@@ -100,7 +100,7 @@ jobs:
           ./device_patches_$DEVICE.sh
 
       - name: Enable Testing Kernel
-        if: ${{ github.event.inputs.kernel == 'testing_kernel' }}
+        if: ${{ env.KERNEL == 'testing_kernel' }}
         run: |
             echo 'CONFIG_TESTING_KERNEL=y' >> .config
 
@@ -146,17 +146,17 @@ jobs:
       - name: Upload buildinfo
         uses: actions/upload-artifact@v4
         with:
-          name: Buildinfo_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          name: Buildinfo_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./artifact/buildinfo/
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: Package_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          name: Package_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./artifact/package/
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: Firmware_${{ github.event.inputs.device }}_${{ github.event.inputs.workchain }}_${{ env.vKERNEL }}_${{ env.today }}
+          name: Firmware_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./bin/targets/
