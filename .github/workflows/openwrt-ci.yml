@@ -19,9 +19,9 @@ on:
         - x86_x64
         default: 'r4s'
         required: false
-      kernal:
+      kernel:
         type: choice
-        description: 'select kernal type'
+        description: 'select kernel type'
         options:
         - regular_kernel
         - testing_kernel
@@ -48,11 +48,11 @@ jobs:
 
   build_openwrt:
 
-    name: Build ${{ github.event.inputs.device }}_${{ github.event.inputs.kernal }}
+    name: Build ${{ github.event.inputs.device }}_${{ github.event.inputs.kernel }}
     runs-on: ubuntu-22.04
     env:
       DEVICE: ${{ github.event.inputs.device }}
-      KERNAL: ${{ github.event.inputs.kernal }}
+      KERNEL: ${{ github.event.inputs.kernel }}
       BRANCH: ${{ github.event.inputs.branch }}
       WORKCHAIN: ${{ github.event.inputs.workchain }}
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -84,39 +84,12 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Fetch library configuration 1
-        if: ${{ github.event.inputs.workchain == 'Generic' }}
+      - name: Fetch library configuration
         run: |
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
           cat device_$DEVICE > .config
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
           cat config_generic >> .config
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
-          chmod +x ./patches_$WORKCHAIN.sh
-          ./patches_$WORKCHAIN.sh
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_patches_$DEVICE.sh
-          chmod +x ./device_patches_$DEVICE.sh
-          ./device_patches_$DEVICE.sh
-      - name: Fetch library configuration 2
-        if: ${{ github.event.inputs.workchain == 'MainNet' }}
-        run: |
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
-          cat device_$DEVICE > .config
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
-          cat config_generic >> .config
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
-          chmod +x ./patches_$WORKCHAIN.sh
-          ./patches_$WORKCHAIN.sh
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_patches_$DEVICE.sh
-          chmod +x ./device_patches_$DEVICE.sh
-          ./device_patches_$DEVICE.sh
-      - name: Fetch library configuration 3
-        if: ${{ github.event.inputs.workchain == 'SubNet' }}
-        run: |
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/device_$DEVICE
-          cat device_$DEVICE > .config
-          wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/config_generic
-          cat config_subnet >> .config
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/patches_$WORKCHAIN.sh
           chmod +x ./patches_$WORKCHAIN.sh
           ./patches_$WORKCHAIN.sh
@@ -124,8 +97,8 @@ jobs:
           chmod +x ./device_patches_$DEVICE.sh
           ./device_patches_$DEVICE.sh
 
-      - name: Enable Testing Kernal
-        if: ${{ github.event.inputs.kernal == 'testing_kernel' }}
+      - name: Enable Testing Kernel
+        if: ${{ github.event.inputs.kernel == 'testing_kernel' }}
         run: |
             echo 'CONFIG_TESTING_KERNEL=y' >> .config
 
@@ -138,7 +111,7 @@ jobs:
       - name: Download packages
         run: |
             cat .config
-            make download -j16
+            make download -j16 || make download -j1 V=s
 
       - name: Compile firmware
         run: |
