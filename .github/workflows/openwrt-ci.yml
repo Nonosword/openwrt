@@ -145,19 +145,19 @@ jobs:
           echo "vKERNEL=$(grep 'CONFIG_LINUX_' .config | cut -d'_' -f 3,4 | cut -d'=' -f 1)" >> $GITHUB_ENV
 
       - name: Upload buildinfo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Buildinfo_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./artifact/buildinfo/
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Package_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./artifact/package/
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Firmware_${{ env.DEVICE }}_${{ env.WORKCHAIN }}_${{ env.vKERNEL }}_${{ env.BRANCH }}_${{ env.today }}
           path: ./bin/targets/
