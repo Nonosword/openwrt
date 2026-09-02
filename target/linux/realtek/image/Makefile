@@ -14,6 +14,8 @@ DEVICE_VARS += \
         CAMEO_KERNEL_PART \
         CAMEO_KERNEL_PART_SIZE \
         CAMEO_ROOTFS_PART \
+	ECS_BOARD_ID \
+        FLASH_ADDR \
         H3C_DEVICE_ID \
         H3C_PRODUCT_ID \
 	LINKSYS_HEADER \
@@ -105,6 +107,13 @@ define Build/belkin-header
 	mv $@.new $@
 endef
 
+# Edgecore images use a 100-byte uImage header. The last two bytes contain
+# the board ID stored in the hwinfo partition.
+define Build/edgecore-header
+	$(STAGING_DIR_HOST)/bin/uimage_padhdr -i $@ -o $@.new -l 36 -s 0:1.0.0.0 -x 34:$(ECS_BOARD_ID)
+	mv $@.new $@
+endef
+
 define Build/linksys-image
 	$(SCRIPT_DIR)/linksys-image.sh $(@) $(@).new $(LINKSYS_MODEL)
 	mv $@.new $@
@@ -112,6 +121,15 @@ endef
 
 define Build/xikestor-nosimg
 	$(STAGING_DIR_HOST)/bin/nosimg-enc -i $@ -o $@.new
+	mv $@.new $@
+endef
+
+define Build/xikestor-sks7300-img
+	$(STAGING_DIR_HOST)/bin/sks7300-img \
+		-i $@ \
+		-o $@.new \
+		-n OpenWrt \
+		-v $(VERSION_DIST)$(firstword $(subst +, , $(firstword $(subst -, ,$(REVISION)))))
 	mv $@.new $@
 endef
 
@@ -135,6 +153,7 @@ define Device/Default
 	uImage gzip
   DEVICE_DTS_DIR := ../dts
   DEVICE_DTS = $$(SOC)_$(1)
+  COMPILE :=
   IMAGES := sysupgrade.bin
   IMAGE/sysupgrade.bin := \
 	append-kernel | \

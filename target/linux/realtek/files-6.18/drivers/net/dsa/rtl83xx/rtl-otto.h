@@ -15,6 +15,49 @@
 #define RTL930X_MAC_L2_PORT_CTRL(port)		(0x3268 + (((port) << 6)))
 #define RTL931X_MAC_L2_PORT_CTRL		(0x6000)
 
+/* MAC maximum packet length (jumbo frame) control.
+ *
+ * The switch MAC drops frames whose L2 length exceeds the configured maximum.
+ * A family holds either one register per user port or a single one for the
+ * whole switch. The length is a direct byte value held in two 14-bit fields
+ * (high-speed links in [13:0], 10/100M links in [27:14]); bit 28 selects
+ * whether VLAN tag bytes count towards the limit.
+ */
+
+/* RTL930x holds one register per user port, inside the 64-byte MAC block of
+ * the port. The CPU port has a row of its own, which the ethernet driver owns
+ * and programs from the conduit MTU. Register offsets taken from the
+ * reverse-engineered Realtek register maps at https://svanheule.net/realtek/
+ */
+#define RTL930X_MAC_L2_PORT_MAX_LEN_CTRL(port)	(0x326C + (((port) << 6)))
+/* RTL931x covers ports 0 to 55 only, one word each. The CPU port has no row:
+ * the word that would follow the array is MAC_DBG_SEL_CTRL.
+ */
+#define RTL931X_MAC_L2_PORT_MAX_LEN_CTRL	(0x5554)
+/* RTL838x and RTL839x hold one limit for the whole switch instead, bounding
+ * the CPU port with it. RTL838x mirrors it in a second register, and the
+ * vendor SDK writes both (dal_maple_switch_maxPktLenLinkSpeed_set()).
+ */
+#define RTL838X_MAC_MAX_LEN_CTRL		(0xa9e0)
+#define RTL838X_MAC_MAX_LEN_CTRL_DUP		(0x6b00)
+#define RTL839X_MAC_MAX_LEN_CTRL		(0x02b0)
+
+/* Both length fields are 14 bits wide (hardware maximum 16383 bytes). */
+#define RTLDSA_MAC_MAX_LEN_FIELD		GENMASK(13, 0)
+/* Mask of both length fields, leaving the tag-inclusion bit (28) untouched. */
+#define RTLDSA_MAC_MAX_LEN_MASK \
+	(RTLDSA_MAC_MAX_LEN_FIELD | (RTLDSA_MAC_MAX_LEN_FIELD << 14))
+/* Encode @len into both the high-speed and the 10/100M length field. */
+#define RTLDSA_MAC_MAX_LEN_VAL(len) \
+	(((len) & RTLDSA_MAC_MAX_LEN_FIELD) | (((len) & RTLDSA_MAC_MAX_LEN_FIELD) << 14))
+
+/* Largest frame each family switches; the length field would allow 16383 */
+#define RTL930X_MAX_FRAME			12288
+#define RTL931X_MAX_FRAME			12288
+/* RTL838x stops at what its datasheet gives, below the vendor SDK value */
+#define RTL838X_MAX_FRAME			10000
+#define RTL839X_MAX_FRAME			12288
+
 #define RTL838X_RST_GLB_CTRL_0			(0x003c)
 
 #define RTL838X_MAC_FORCE_MODE_CTRL		(0xa104)
@@ -570,17 +613,7 @@
 #define RTL931X_ISR_GLB_SRC			(0x12B4)
 #define RTL931X_ISR_PORT_LINK_STS_CHG		(0x12B8)
 
-/*
- * MDIO via Realtek's SMI interface
- */
-#define RTL838X_SMI_GLB_CTRL			(0xa100)
-#define RTL838X_SMI_POLL_CTRL			(0xa17c)
-
-#define RTL839X_SMI_GLB_CTRL			(0x03f8)
-#define RTL839X_SMI_PORT_POLLING_CTRL		(0x03fc)
-
-#define RTL930X_SMI_POLL_CTRL			(0xca90)
-#define RTL931X_SMI_PORT_POLLING_CTRL		(0x0CCC)
+#define RTL838X_SMI_GLB_CTRL			(0xa100) /* used by RTL838x EEE setup */
 
 #define RTL838X_LED_GLB_CTRL			(0xA000)
 #define RTL839X_LED_GLB_CTRL			(0x00E4)
@@ -641,6 +674,15 @@ typedef enum {
 	TRAP2MASTERCPU,
 	COPY2CPU,
 } action_type_t;
+
+enum rtldsa_flood_type {
+	RTLDSA_FLOOD_TYPE_FORWARD = 0,
+	RTLDSA_FLOOD_TYPE_DROP,
+	RTLDSA_FLOOD_TYPE_TRAP2CPU,
+	RTLDSA_FLOOD_TYPE_COPY2CPU,
+	RTLDSA_FLOOD_TYPE_TRAP2MASTER,
+	RTLDSA_FLOOD_TYPE_COPY2MASTER,
+};
 
 #define RTL838X_RMA_BPDU_CTRL			(0x4330)
 #define RTL839X_RMA_BPDU_CTRL			(0x122C)
@@ -870,11 +912,8 @@ typedef enum {
 #define N_FIXED_FIELDS 12
 #define N_FIXED_FIELDS_RTL931X 14
 #define MAX_COUNTERS 2048
-#define MAX_ROUTES 512
-#define MAX_HOST_ROUTES 1536
 #define MAX_INTF_MTUS 8
 #define DEFAULT_MTU 1536
-#define MAX_INTERFACES 100
 #define MAX_ROUTER_MACS 64
 #define L3_EGRESS_DMACS 2048
 #define MAX_SMACS 64
@@ -1000,17 +1039,19 @@ struct rtldsa_port {
 	bool isolated:1;
 	bool rate_police_egress:1;
 	bool rate_police_ingress:1;
+	unsigned long cached_flags;
 	u64 pm;
 	u16 pvid;
 	bool eee_enabled;
-	struct phylink_pcs *pcs;
+	bool has_pcs;
 	int led_set;
+	enum rtldsa_flood_type flood_type;
 	int leds_on_this_port;
 	struct rtldsa_counter_state counters;
 	const struct dsa_port *dp;
 };
 
-struct rtl838x_vlan_info {
+struct rtldsa_vlan_info {
 	u64 untagged_ports;
 	u64 member_ports;
 	u8 profile_id;
@@ -1268,53 +1309,6 @@ struct pie_rule {
 	bool bypass_ibc_sc;	/* Bypass Ingress Bandwidth Control and Storm Control */
 };
 
-struct rtl838x_l3_intf {
-	u16 vid;
-	u8 smac_idx;
-	u8 ip4_mtu_id;
-	u8 ip6_mtu_id;
-	u16 ip4_mtu;
-	u16 ip6_mtu;
-	u8 ttl_scope;
-	u8 hl_scope;
-	u8 ip4_icmp_redirect;
-	u8 ip6_icmp_redirect;
-	u8 ip4_pbr_icmp_redirect;
-	u8 ip6_pbr_icmp_redirect;
-};
-
-/* An entry in the RTL93XX SoC's ROUTER_MAC tables setting up a termination point
- * for the L3 routing system. Packets arriving and matching an entry in this table
- * will be considered for routing.
- * Mask fields state whether the corresponding data fields matter for matching
- */
-struct rtl93xx_rt_mac {
-	bool valid;	/* Valid or not */
-	bool p_type;	/* Individual (0) or trunk (1) port */
-	bool p_mask;	/* Whether the port type is used */
-	u8 p_id;
-	u8 p_id_mask;	/* Mask for the port */
-	u8 action;	/* Routing action performed: 0: FORWARD, 1: DROP, 2: TRAP2CPU */
-			/*   3: COPY2CPU, 4: TRAP2MASTERCPU, 5: COPY2MASTERCPU, 6: HARDDROP */
-	u16 vid;
-	u16 vid_mask;
-	u64 mac;	/* MAC address used as source MAC in the routed packet */
-	u64 mac_mask;
-};
-
-struct rtl83xx_nexthop {
-	u16 id;		/* ID: L3_NEXT_HOP table-index or route-index set in L2_NEXT_HOP */
-	u32 dev_id;
-	u16 port;
-	u16 vid;	/* VLAN-ID for L2 table entry (saved from L2-UC entry) */
-	u16 rvid;	/* Relay VID/FID for the L2 table entry */
-	u64 mac;	/* The MAC address of the entry in the L2_NEXT_HOP table */
-	u16 mac_id;
-	u16 l2_id;	/* Index of this next hop forwarding entry in L2 FIB table */
-	u64 gw;		/* The gateway MAC address packets are forwarded to */
-	int if_id;	/* Interface (into L3_EGR_INTF_IDX) */
-};
-
 struct rtl838x_switch_priv;
 
 struct rtl83xx_flow {
@@ -1324,32 +1318,6 @@ struct rtl83xx_flow {
 	struct rtl838x_switch_priv *priv;
 	struct pie_rule rule;
 	u32 flags;
-};
-
-struct rtl93xx_route_attr {
-	bool valid;
-	bool hit;
-	bool ttl_dec;
-	bool ttl_check;
-	bool dst_null;
-	bool qos_as;
-	u8 qos_prio;
-	u8 type;
-	u8 action;
-};
-
-struct rtl83xx_route {
-	u32 gw_ip;			/* IP of the route's gateway */
-	u32 dst_ip;			/* IP of the destination net */
-	struct in6_addr dst_ip6;
-	int prefix_len;			/* Network prefix len of the destination net */
-	bool is_host_route;
-	int id;				/* ID number of this route */
-	struct rhlist_head linkage;
-	u16 switch_mac_id;		/* Index into switch's own MACs, RTL839X only */
-	struct rtl83xx_nexthop nh;
-	struct pie_rule pr;
-	struct rtl93xx_route_attr attr;
 };
 
 /**
@@ -1380,6 +1348,7 @@ struct rtldsa_config {
 	u64 (*get_port_reg_le)(int reg);
 	int stat_port_rst;
 	int stat_rst;
+	void (*stat_init)(struct rtl838x_switch_priv *priv);
 	int stat_port_std_mib;
 	int stat_port_prv_mib;
 	const struct rtldsa_mib_desc *mib_desc;
@@ -1404,12 +1373,10 @@ struct rtldsa_config {
 	void (*traffic_set)(int source, u64 dest_matrix);
 	int l2_ctrl_0;
 	int l2_ctrl_1;
-	int smi_poll_ctrl;
+	bool high_res_l2_age;
+	u32 self_mac_trap_ctrl;
 	u32 l2_port_aging_out;
 	int l2_tbl_flush_ctrl;
-	void (*exec_tbl0_cmd)(u32 cmd);
-	void (*exec_tbl1_cmd)(u32 cmd);
-	int (*tbl_access_data_0)(int i);
 	int isr_glb_src;
 	int isr_port_link_sts_chg;
 	int imr_port_link_sts_chg;
@@ -1425,8 +1392,8 @@ struct rtldsa_config {
 	int trk_ctrl;
 	int trk_hash_ctrl;
 	int spanning_tree_ctrl;
-	void (*vlan_tables_read)(u32 vlan, struct rtl838x_vlan_info *info);
-	void (*vlan_set_tagged)(u32 vlan, struct rtl838x_vlan_info *info);
+	void (*vlan_tables_read)(u32 vlan, struct rtldsa_vlan_info *info);
+	void (*vlan_set_tagged)(u32 vlan, struct rtldsa_vlan_info *info);
 	void (*vlan_set_untagged)(u32 vlan, u64 portmask);
 	int (*vlan_profile_get)(int index, struct rtldsa_vlan_profile *profile);
 	void (*vlan_profile_dump)(struct rtl838x_switch_priv *priv, int index);
@@ -1438,15 +1405,47 @@ struct rtldsa_config {
 	void (*set_vlan_igr_filter)(int port, enum igr_filter state);
 	void (*set_vlan_egr_filter)(int port, enum egr_filter state);
 	void (*enable_learning)(int port, bool enable);
-	void (*enable_flood)(int port, bool enable);
+	void (*enable_l2_new_sa_fwd)(int port, enum rtldsa_flood_type flood_type);
+	void (*enable_flood)(int port, enum rtldsa_flood_type flood_type);
 	void (*enable_mcast_flood)(int port, bool enable);
 	void (*enable_bcast_flood)(int port, bool enable);
 	void (*set_static_move_action)(int port, bool forward);
-	int (*stp_get)(struct rtl838x_switch_priv *priv, u16 msti, int port, u32 port_state[]);
-	void (*stp_set)(struct rtl838x_switch_priv *priv, u16 msti, u32 port_state[]);
+	int (*stp_get)(struct rtl838x_switch_priv *priv, u16 msti, int port);
+	void (*stp_set)(struct rtl838x_switch_priv *priv, u16 msti, int port, int state);
 	int mac_link_sts;
+	u32 mac_force_mode_mask;
 	int  (*mac_force_mode_ctrl)(int port);
 	int  (*mac_port_ctrl)(int port);
+
+	/**
+	 * @mac_max_len_reg: Return the switch register holding the MAC maximum
+	 * accepted L2 frame length of user port @p. Families whose limit is one
+	 * register for the whole switch leave this unset and set
+	 * @mac_max_len_ctrl instead.
+	 */
+	int  (*mac_max_len_reg)(int p);
+
+	/**
+	 * @mac_max_len_ctrl: Register holding that same limit for every port of
+	 * the switch at once, on the families that have no per port register.
+	 * Set this or @mac_max_len_reg, never both.
+	 */
+	int mac_max_len_ctrl;
+
+	/**
+	 * @mac_max_len_ctrl_dup: Second register mirroring @mac_max_len_ctrl,
+	 * where the family has one. The vendor SDK writes both.
+	 */
+	int mac_max_len_ctrl_dup;
+
+	/**
+	 * @max_frame: Largest L2 frame the family switches, and what turns the
+	 * MTU operations on: families leaving it unset keep the ether_setup()
+	 * default MTU and refuse changes. Set together with a max-length
+	 * register.
+	 */
+	int max_frame;
+
 	int  (*l2_port_new_salrn)(int port);
 	int  (*l2_port_new_sa_fwd)(int port);
 	int (*set_ageing_time)(unsigned long msec);
@@ -1477,21 +1476,10 @@ struct rtldsa_config {
 	void (*l2_learning_setup)(void);
 	u32 (*packet_cntr_read)(int counter);
 	void (*packet_cntr_clear)(int counter);
-	void (*route_read)(int idx, struct rtl83xx_route *rt);
-	void (*route_write)(int idx, struct rtl83xx_route *rt);
-	void (*host_route_write)(int idx, struct rtl83xx_route *rt);
-	int (*l3_setup)(struct rtl838x_switch_priv *priv);
-	void (*set_l3_nexthop)(int idx, u16 dmac_id, u16 interface);
-	void (*get_l3_nexthop)(int idx, u16 *dmac_id, u16 *interface);
-	u64 (*get_l3_egress_mac)(u32 idx);
-	void (*set_l3_egress_mac)(u32 idx, u64 mac);
-	int (*find_l3_slot)(struct rtl83xx_route *rt, bool must_exist);
-	int (*route_lookup_hw)(struct rtl83xx_route *rt);
-	void (*get_l3_router_mac)(u32 idx, struct rtl93xx_rt_mac *m);
-	void (*set_l3_router_mac)(u32 idx, struct rtl93xx_rt_mac *m);
-	void (*set_l3_egress_intf)(int idx, struct rtl838x_l3_intf *intf);
 	void (*set_receive_management_action)(int port, rma_ctrl_t type, action_type_t action);
 	void (*led_init)(struct rtl838x_switch_priv *priv);
+	u32 (*get_egress_rate)(struct rtl838x_switch_priv *priv, int port);
+	int (*set_egress_rate)(struct rtl838x_switch_priv *priv, int port, u32 rate);
 	void (*qos_init)(struct rtl838x_switch_priv *priv);
 	int (*trk_mbr_ctr)(int group);
 	void (*lag_switch_init)(struct rtl838x_switch_priv *priv);
@@ -1523,6 +1511,7 @@ struct rtl838x_switch_priv {
 	int link_state_irq;
 	int mirror_group_ports[4];
 	const struct rtldsa_config *r;
+	struct otto_l3_ctrl *l3_ctrl;
 	u64 irq_mask;
 	struct dentry *dbgfs_dir;
 
@@ -1543,26 +1532,15 @@ struct rtl838x_switch_priv {
 	/** @lagmembers: Port (bit) is part of any LAG */
 	u64 lagmembers;
 	struct workqueue_struct *wq;
-	struct notifier_block ne_nb;
-	struct notifier_block fib_nb;
 	bool eee_enabled;
 	unsigned long mc_group_bm[MAX_MC_GROUPS >> 5];
 	struct rhashtable tc_ht;
 	unsigned long pie_use_bm[MAX_PIE_ENTRIES >> 5];
 	unsigned long octet_cntr_use_bm[MAX_COUNTERS >> 5];
 	unsigned long packet_cntr_use_bm[MAX_COUNTERS >> 4];
-	struct rhltable routes;
-	unsigned long route_use_bm[MAX_ROUTES >> 5];
-	unsigned long host_route_use_bm[MAX_HOST_ROUTES >> 5];
-	struct rtl838x_l3_intf *interfaces[MAX_INTERFACES];
 	u16 intf_mtus[MAX_INTF_MTUS];
 	int intf_mtu_count[MAX_INTF_MTUS];
 
-	/**
-	 * @msts: MSTI to HW MST slot allocations. index 0 is for HW slot 1 because CIST is
-	 * not stored in @msts
-	 */
-	struct rtldsa_mst *msts;
 	struct delayed_work counters_work;
 
 	/**
@@ -1571,6 +1549,12 @@ struct rtl838x_switch_priv {
 	 * periodically.
 	 */
 	struct mutex counters_lock;
+
+	/**
+	 * @msts: MSTI to HW MST slot allocations. index 0 is for HW slot 1 because CIST is
+	 * not stored in @msts
+	 */
+	struct rtldsa_mst msts[];
 };
 
 struct fdb_update_work {
@@ -1709,20 +1693,20 @@ int rtl83xx_setup_tc(struct net_device *dev, enum tc_setup_type type, void *type
 
 /* Port register accessor functions for the RTL839x and RTL931X SoCs */
 void rtl839x_mask_port_reg_be(u64 clear, u64 set, int reg);
-u32 rtl839x_get_egress_rate(struct rtl838x_switch_priv *priv, int port);
+u32 rtldsa_839x_get_egress_rate(struct rtl838x_switch_priv *priv, int port);
 u64 rtl839x_get_port_reg_be(int reg);
 void rtl839x_set_port_reg_be(u64 set, int reg);
 void rtl839x_mask_port_reg_le(u64 clear, u64 set, int reg);
-int rtl839x_set_egress_rate(struct rtl838x_switch_priv *priv, int port, u32 rate);
+int rtldsa_839x_set_egress_rate(struct rtl838x_switch_priv *priv, int port, u32 rate);
 void rtl839x_set_port_reg_le(u64 set, int reg);
 u64 rtl839x_get_port_reg_le(int reg);
 
 /* Port register accessor functions for the RTL838x and RTL930X SoCs */
 void rtl838x_mask_port_reg(u64 clear, u64 set, int reg);
 void rtl838x_set_port_reg(u64 set, int reg);
-u32 rtl838x_get_egress_rate(struct rtl838x_switch_priv *priv, int port);
+u32 rtldsa_838x_get_egress_rate(struct rtl838x_switch_priv *priv, int port);
 u64 rtl838x_get_port_reg(int reg);
-int rtl838x_set_egress_rate(struct rtl838x_switch_priv *priv, int port, u32 rate);
+int rtldsa_838x_set_egress_rate(struct rtl838x_switch_priv *priv, int port, u32 rate);
 
 /* RTL838x-specific */
 u32 rtl838x_hash(struct rtl838x_switch_priv *priv, u64 seed);
@@ -1790,6 +1774,12 @@ void rtldsa_counters_unlock_table(struct rtl838x_switch_priv *priv, int port)
 	__releases(&priv->ports[port].counters.lock);
 
 void rtldsa_update_counters_atomically(struct rtl838x_switch_priv *priv, int port);
+
+
+struct otto_l3_nexthop;
+int rtl83xx_l2_nexthop_add(struct rtl838x_switch_priv *priv, struct otto_l3_nexthop *nh);
+int rtl83xx_l2_nexthop_rm(struct rtl838x_switch_priv *priv, struct otto_l3_nexthop *nh);
+
 
 extern int rtldsa_max_available_queue[];
 extern int rtldsa_default_queue_weights[];

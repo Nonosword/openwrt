@@ -253,6 +253,16 @@ define Trusted-Firmware-A/mt7981-spim-nand-ddr3-1866
   DDR3_FREQ_1866:=1
 endef
 
+define Trusted-Firmware-A/mt7981-spim-nand-ubi-ddr3-1866
+  NAME:=MediaTek MT7981 (SPI-NAND via SPIM, UBI, DDR3 1866 MT/s)
+  BOOT_DEVICE:=spim-nand
+  BUILD_SUBTARGET:=filogic
+  PLAT:=mt7981
+  DDR_TYPE:=ddr3
+  DDR3_FREQ_1866:=1
+  USE_UBI:=1
+endef
+
 define Trusted-Firmware-A/mt7981-spim-nand-ubi-ddr4
   NAME:=MediaTek MT7981 (SPI-NAND via SPIM, DDR4)
   BOOT_DEVICE:=spim-nand
@@ -263,11 +273,12 @@ define Trusted-Firmware-A/mt7981-spim-nand-ubi-ddr4
 endef
 
 define Trusted-Firmware-A/mt7981-cudy-ddr3
-  NAME:=Cudy (SPI-NAND via SPIM, DDR3)
+  NAME:=Cudy (SPI-NAND via SPIM, DDR3 1866 MT/s)
   BOOT_DEVICE:=spim-nand
   BUILD_SUBTARGET:=filogic
   PLAT:=mt7981
   DDR_TYPE:=ddr3
+  DDR3_FREQ_1866:=1
   FIP_OFFSET:=0x3c0000
   FIP_SIZE:=0x200000
 endef
@@ -712,6 +723,7 @@ TFA_TARGETS:= \
 	mt7981-snand-ddr3 \
 	mt7981-spim-nand-ddr3 \
 	mt7981-spim-nand-ddr3-1866 \
+	mt7981-spim-nand-ubi-ddr3-1866 \
 	mt7981-spim-nand-ubi-ddr4 \
 	mt7981-ram-ddr4 \
 	mt7981-emmc-ddr4 \

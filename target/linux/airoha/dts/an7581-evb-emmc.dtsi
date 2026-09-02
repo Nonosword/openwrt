@@ -5,6 +5,10 @@
 #include <dt-bindings/gpio/gpio.h>
 #include "an7581.dtsi"
 
+&afe {
+	status = "okay";
+};
+
 &sound {
 	audio-routing = "Headphone", "HP_L",
 			"Headphone", "HP_R",
@@ -19,7 +23,7 @@
 };
 
 &en7581_pinctrl {
-	gpio-ranges = <&en7581_pinctrl 0 13 47>;
+	gpio-ranges = <&en7581_pinctrl 0 13 50>;
 
 	mdio_pins: mdio-pins {
 		mux {
@@ -231,6 +235,7 @@
 &gdm4 {
 	status = "okay";
 
+	managed = "in-band-status";
 	phy-handle = <&as21xx_1>;
 	phy-mode = "usxgmii";
 };

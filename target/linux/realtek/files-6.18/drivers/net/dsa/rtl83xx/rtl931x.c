@@ -25,6 +25,12 @@
 #define RTL931X_VLAN_PORT_TAG_ITPID_IDX_MASK			GENMASK(2, 1)
 #define RTL931X_VLAN_PORT_TAG_ITPID_KEEP_MASK			GENMASK(0, 0)
 
+#define RTL931X_LED_CLK_SEL_MASK				GENMASK(16, 15)
+#define RTL931X_LED_CLK_SEL_800NS				0
+#define RTL931X_LED_CLK_SEL_400NS				1
+#define RTL931X_LED_CLK_SEL_200NS				2
+#define RTL931X_LED_CLK_SEL_100NS				3
+
 /* Definition of the RTL931X-specific template field IDs as used in the PIE */
 enum template_field_id {
 	TEMPLATE_FIELD_SPM0 = 1,
@@ -213,23 +219,6 @@ const struct rtldsa_mib_desc rtldsa_931x_mib_desc = {
 	.list = rtldsa_931x_mib_list
 };
 
-inline void rtl931x_exec_tbl0_cmd(u32 cmd)
-{
-	sw_w32(cmd, RTL931X_TBL_ACCESS_CTRL_0);
-	do { } while (sw_r32(RTL931X_TBL_ACCESS_CTRL_0) & (1 << 20));
-}
-
-inline void rtl931x_exec_tbl1_cmd(u32 cmd)
-{
-	sw_w32(cmd, RTL931X_TBL_ACCESS_CTRL_1);
-	do { } while (sw_r32(RTL931X_TBL_ACCESS_CTRL_1) & (1 << 17));
-}
-
-inline int rtl931x_tbl_access_data_0(int i)
-{
-	return RTL931X_TBL_ACCESS_DATA_0(i);
-}
-
 static int
 rtldsa_931x_vlan_profile_get(int idx, struct rtldsa_vlan_profile *profile)
 {
@@ -267,31 +256,30 @@ rtldsa_931x_vlan_profile_dump(struct rtl838x_switch_priv *priv, int idx)
 		p.unkn_mc_fld.pmsks.ip, p.unkn_mc_fld.pmsks.ip6);
 }
 
-static int rtldsa_931x_stp_get(struct rtl838x_switch_priv *priv, u16 msti, int port, u32 port_state[])
+static int rtldsa_931x_stp_get(struct rtl838x_switch_priv *priv, u16 msti, int port)
 {
+	struct table_reg *r = rtl_table_get(RTL9310_TBL_0, 5);
 	int idx = 3 - ((port + 8) / 16);
 	int bit = 2 * ((port + 8) % 16);
-	u32 cmd = 1 << 20 | /* Execute cmd */
-		  0 << 19 | /* Read */
-		  5 << 15 | /* Table type 0b101 */
-		  (msti & 0x3fff);
+	int state;
 
-	priv->r->exec_tbl0_cmd(cmd);
-	for (int i = 0; i < 4; i++)
-		port_state[i] = sw_r32(priv->r->tbl_access_data_0(i));
+	rtl_table_read(r, msti);
+	state = (sw_r32(rtl_table_data(r, idx)) >> bit) & 0x3;
+	rtl_table_release(r);
 
-	return (port_state[idx] >> bit) & 3;
+	return state;
 }
 
-static void rtl931x_stp_set(struct rtl838x_switch_priv *priv, u16 msti, u32 port_state[])
+static void rtl931x_stp_set(struct rtl838x_switch_priv *priv, u16 msti, int port, int state)
 {
-	u32 cmd = 1 << 20 | /* Execute cmd */
-		  1 << 19 | /* Write */
-		  5 << 15 | /* Table type 0b101 */
-		  (msti & 0x3fff);
-	for (int i = 0; i < 4; i++)
-		sw_w32(port_state[i], priv->r->tbl_access_data_0(i));
-	priv->r->exec_tbl0_cmd(cmd);
+	struct table_reg *r = rtl_table_get(RTL9310_TBL_0, 5);
+	int idx = 3 - ((port + 8) / 16);
+	int bit = 2 * ((port + 8) % 16);
+
+	rtl_table_read(r, msti);
+	sw_w32_mask(0x3 << bit, state << bit, rtl_table_data(r, idx));
+	rtl_table_write(r, msti);
+	rtl_table_release(r);
 }
 
 static inline int rtldsa_931x_trk_mbr_ctr(int group)
@@ -299,7 +287,7 @@ static inline int rtldsa_931x_trk_mbr_ctr(int group)
 	return RTL931X_TRK_MBR_CTRL + (group << 3);
 }
 
-static void rtl931x_vlan_tables_read(u32 vlan, struct rtl838x_vlan_info *info)
+static void rtl931x_vlan_tables_read(u32 vlan, struct rtldsa_vlan_info *info)
 {
 	u32 v, w, x, y;
 	/* Read VLAN table (3) via register 0 */
@@ -337,7 +325,7 @@ static void rtl931x_vlan_tables_read(u32 vlan, struct rtl838x_vlan_info *info)
 	rtl_table_release(r);
 }
 
-static void rtl931x_vlan_set_tagged(u32 vlan, struct rtl838x_vlan_info *info)
+static void rtl931x_vlan_set_tagged(u32 vlan, struct rtldsa_vlan_info *info)
 {
 	struct table_reg *r;
 	u32 v, w, x, y;
@@ -384,6 +372,11 @@ static inline int rtl931x_mac_force_mode_ctrl(int p)
 static inline int rtl931x_mac_port_ctrl(int p)
 {
 	return RTL931X_MAC_L2_PORT_CTRL + (p << 7);
+}
+
+static inline int rtl931x_mac_max_len_reg(int p)
+{
+	return RTL931X_MAC_L2_PORT_MAX_LEN_CTRL + (p << 2);
 }
 
 static inline int rtl931x_l2_port_new_salrn(int p)
@@ -468,8 +461,8 @@ void rtldsa_931x_print_matrix(void)
 
 	for (int i = 0; i < 64; i++) {
 		rtl_table_read(r, i);
-		pr_info("> %08x %08x\n", sw_r32(rtl_table_data(r, 0)),
-			sw_r32(rtl_table_data(r, 1)));
+		pr_debug("> %08x %08x\n", sw_r32(rtl_table_data(r, 0)),
+			 sw_r32(rtl_table_data(r, 1)));
 	}
 	rtl_table_release(r);
 }
@@ -920,17 +913,41 @@ static void rtldsa_931x_enable_learning(int port, bool enable)
 		    RTL931X_L2_LRN_PORT_CONSTRT_CTRL + port * 4);
 }
 
-static void rtldsa_931x_enable_flood(int port, bool enable)
+static void rtldsa_931x_l2_port_new_sa_fwd(int port, enum rtldsa_flood_type mode)
 {
-	/* 0: forward
-	 * 1: drop
-	 * 2: trap to local CPU
-	 * 3: copy to local CPU
-	 * 4: trap to master CPU
-	 * 5: copy to master CPU
-	 */
-	sw_w32_mask(GENMASK(2, 0), enable ? 0 : 1,
+	u32 new_sa_fwd_shift = (port % 10) * 3;
+
+	sw_w32_mask(GENMASK(new_sa_fwd_shift + 2, new_sa_fwd_shift),
+		    mode << new_sa_fwd_shift,
+		    rtl931x_l2_port_new_sa_fwd(port));
+}
+
+static void rtldsa_931x_enable_flood(int port, enum rtldsa_flood_type mode)
+{
+	/* RTL931X_L2_UNKN_UC_FLD_PMSK is big-endian */
+	u32 port_offset = ((63 - port) / 32) * 4;
+	u32 port_mask = BIT(port % 32);
+	u32 val;
+
+	val = (mode == RTLDSA_FLOOD_TYPE_FORWARD) ? port_mask : 0;
+
+	sw_w32_mask(GENMASK(2, 0), mode,
 		    RTL931X_L2_LRN_PORT_CONSTRT_CTRL + port * 4);
+
+	sw_w32_mask(port_mask,
+		    val,
+		    RTL931X_L2_UNKN_UC_FLD_PMSK + port_offset);
+}
+
+static void rtldsa_931x_enable_bcast_flood(int port, bool enable)
+{
+	/* RTL931X_L2_BC_FLD_PMSK is big-endian */
+	u32 port_offset = ((63 - port) / 32) * 4;
+	u32 port_mask = BIT(port % 32);
+
+	sw_w32_mask(port_mask,
+		    enable ? port_mask : 0,
+		    RTL931X_L2_BC_FLD_PMSK + port_offset);
 }
 
 static u64 rtl931x_read_mcast_pmask(int idx)
@@ -1621,11 +1638,39 @@ static void rtldsa_931x_led_init(struct rtl838x_switch_priv *priv)
 	struct device *dev = priv->dev;
 	struct device_node *node;
 	u8 leds_in_set[4] = {};
+	u32 clk_freq;
+	int ret;
 
 	node = of_find_compatible_node(NULL, NULL, "realtek,rtl9300-leds");
 	if (!node) {
 		dev_dbg(dev, "No compatible LED node found\n");
 		return;
+	}
+
+	ret = of_property_read_u32(node, "clock-frequency", &clk_freq);
+	if (!ret) {
+		u8 clk_sel;
+
+		switch (clk_freq) {
+		case 10000000:
+			clk_sel = RTL931X_LED_CLK_SEL_100NS;
+			break;
+		case 5000000:
+			clk_sel = RTL931X_LED_CLK_SEL_200NS;
+			break;
+		case 1250000:
+			clk_sel = RTL931X_LED_CLK_SEL_800NS;
+			break;
+		default:
+			dev_warn(dev, "invalid LED clock frequency, falling back to default\n");
+			fallthrough;
+		case 2500000:
+			clk_sel = RTL931X_LED_CLK_SEL_400NS;
+			break;
+		}
+
+		sw_w32_mask(RTL931X_LED_CLK_SEL_MASK,
+			    FIELD_PREP(RTL931X_LED_CLK_SEL_MASK, clk_sel), RTL931X_LED_GLB_CTRL);
 	}
 
 	for (int set = 0; set < 4; set++) {
@@ -1678,7 +1723,7 @@ static void rtldsa_931x_led_init(struct rtl838x_switch_priv *priv)
 		sw_w32_mask(0x3 << pos, 0, RTL931X_LED_PORT_COPR_SET_SEL_CTRL(i));
 
 		/* Skip port if not present (auto-detect) or not in forced mask */
-		if (!priv->ports[i].phy && !priv->ports[i].pcs && !(forced_leds_per_port[i]))
+		if (!priv->ports[i].phy && !priv->ports[i].has_pcs && !(forced_leds_per_port[i]))
 			continue;
 
 		if (forced_leds_per_port[i] > 0)
@@ -1963,11 +2008,7 @@ const struct rtldsa_config rtldsa_931x_cfg = {
 	.l2_ctrl_1 = RTL931X_L2_AGE_CTRL,
 	.l2_port_aging_out = RTL931X_L2_PORT_AGE_CTRL,
 	.set_ageing_time = rtl931x_set_ageing_time,
-	.smi_poll_ctrl = RTL931X_SMI_PORT_POLLING_CTRL,
 	.l2_tbl_flush_ctrl = RTL931X_L2_TBL_FLUSH_CTRL,
-	.exec_tbl0_cmd = rtl931x_exec_tbl0_cmd,
-	.exec_tbl1_cmd = rtl931x_exec_tbl1_cmd,
-	.tbl_access_data_0 = rtl931x_tbl_access_data_0,
 	.isr_glb_src = RTL931X_ISR_GLB_SRC,
 	.isr_port_link_sts_chg = RTL931X_ISR_PORT_LINK_STS_CHG,
 	.imr_port_link_sts_chg = RTL931X_IMR_PORT_LINK_STS_CHG,
@@ -1984,9 +2025,12 @@ const struct rtldsa_config rtldsa_931x_cfg = {
 	.vlan_fwd_on_inner = rtl931x_vlan_fwd_on_inner,
 	.stp_get = rtldsa_931x_stp_get,
 	.stp_set = rtl931x_stp_set,
+	.mac_force_mode_mask = RTL931X_FORCE_EN | RTL931X_FORCE_LINK_EN,
 	.mac_force_mode_ctrl = rtl931x_mac_force_mode_ctrl,
 	.mac_link_sts = RTL931X_MAC_LINK_STS,
 	.mac_port_ctrl = rtl931x_mac_port_ctrl,
+	.mac_max_len_reg = rtl931x_mac_max_len_reg,
+	.max_frame = RTL931X_MAX_FRAME,
 	.l2_port_new_salrn = rtl931x_l2_port_new_salrn,
 	.l2_port_new_sa_fwd = rtl931x_l2_port_new_sa_fwd,
 	.get_mirror_config = rtldsa_931x_get_mirror_config,
@@ -2016,7 +2060,9 @@ const struct rtldsa_config rtldsa_931x_cfg = {
 	.l2_learning_setup = rtl931x_l2_learning_setup,
 	.led_init = rtldsa_931x_led_init,
 	.enable_learning = rtldsa_931x_enable_learning,
+	.enable_l2_new_sa_fwd = rtldsa_931x_l2_port_new_sa_fwd,
 	.enable_flood = rtldsa_931x_enable_flood,
+	.enable_bcast_flood = rtldsa_931x_enable_bcast_flood,
 	.set_receive_management_action = rtldsa_931x_set_receive_management_action,
 	.qos_init = rtldsa_931x_qos_init,
 	.trk_ctrl = RTL931X_TRK_CTRL,

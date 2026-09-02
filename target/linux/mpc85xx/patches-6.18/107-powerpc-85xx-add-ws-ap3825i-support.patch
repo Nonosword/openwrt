@@ -55,8 +55,8 @@ WS-AP3825i AP.
  
 --- a/arch/powerpc/boot/wrapper
 +++ b/arch/powerpc/boot/wrapper
-@@ -346,6 +346,11 @@ simpleboot-ws-ap3710i)
-     link_address='0x1500000'
+@@ -344,6 +344,11 @@ simpleboot-ws-ap3710i)
+     link_address='0x3000000'
      binary=y
      ;;
 +simpleboot-ws-ap3825i)

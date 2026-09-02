@@ -12,6 +12,13 @@
 		compatible = "ethernet-phy-ieee802.3-c22"; \
 	};
 
+#define PHY_C22_SFP(p, n, s) \
+	phy##p: ethernet-phy@n { \
+		reg = <##n>; \
+		compatible = "ethernet-phy-ieee802.3-c22"; \
+		sfp = <&sfp##s>; \
+	};
+
 #define PHY_C45(p, n) \
 	phy##p: ethernet-phy@n { \
 		reg = <##n>; \
@@ -25,19 +32,19 @@
 		enet-phy-pair-order = <##po>; \
 	};
 
-#define EXTERNAL_SFP_PHY(n) \
-	phy##n: ethernet-phy@##n { \
-		compatible = "ethernet-phy-ieee802.3-c22"; \
-		sfp; \
-		media = "fibre"; \
+#define PHY_C45_PSE(p, n, pi) \
+	phy##p: ethernet-phy@n { \
 		reg = <##n>; \
+		compatible = "ethernet-phy-ieee802.3-c45"; \
+		pses = <&pi>; \
 	};
 
-#define EXTERNAL_SFP_PHY_FULL(n, s) \
-	phy##n: ethernet-phy@##n { \
-		compatible = "ethernet-phy-ieee802.3-c22"; \
-		sfp = <&sfp##s>; \
-		reg = <##n>; \
+#define HASH_PSE_CELLS #pse-cells
+
+#define PSE_PI(p) \
+	pse_pi##p: pse-pi@p { \
+		reg = <p>; \
+		HASH_PSE_CELLS = <0>; \
 	};
 
 #define SWITCH_PORT(p, l, m) \
@@ -48,21 +55,21 @@
 		phy-mode = #m ; \
 	};
 
-#define SWITCH_PORT_SDS(p, l, s, m) \
+#define SWITCH_PORT_SDS(p, l, s, i, m) \
 	port##p: port@##p { \
 		reg = <##p>; \
 		label = SWITCH_PORT_LABEL(l) ; \
-		pcs-handle = <&serdes##s>; \
+		pcs-handle = <&serdes##s i>; \
 		phy-handle = <&phy##p>; \
 		phy-mode = #m ; \
 	};
 
-#define SWITCH_PORT_LED(p, l, s, c, m) \
+#define SWITCH_PORT_LED(p, l, s, i, c, m) \
 	port##p: port@##p { \
 		reg = <##p>; \
 		label = SWITCH_PORT_LABEL(l) ; \
 		led-set = <##c>; \
-		pcs-handle = <&serdes##s>; \
+		pcs-handle = <&serdes##s i>; \
 		phy-handle = <&phy##p>; \
 		phy-mode = #m ; \
 	};
@@ -72,13 +79,13 @@
 		reg = <##p>; \
 		label = SWITCH_PORT_LABEL(l) ; \
 		led-set = <##c>; \
-		pcs-handle = <&serdes##s>; \
+		pcs-handle = <&serdes##s 0>; \
 		phy-mode = "1000base-x"; \
 		sfp = <&sfp##g>; \
 		managed = "in-band-status"; \
 	};
 
-// LED Set mode definitions
+/* LED Set mode definitions */
 #define RTL93XX_LED_SET_NONE        (0)
 #define RTL93XX_LED_SET_10G         (1 << 0)
 #define RTL93XX_LED_SET_5G          (1 << 1)
@@ -93,3 +100,8 @@
 #define RTL93XX_LED_SET_TX          (1 << 13)
 #define RTL93XX_LED_SET_COLLISION   (1 << 14)
 #define RTL93XX_LED_SET_DUPLEX      (1 << 15)
+
+/* LED Interface modes */
+#define RTL93XX_LED_MODE_SERIAL             1
+#define RTL93XX_LED_MODE_SINGLE_COLOR_SCAN  2
+#define RTL93XX_LED_MODE_BI_COLOR_SCAN      3

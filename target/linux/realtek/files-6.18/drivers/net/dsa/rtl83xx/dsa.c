@@ -3,9 +3,16 @@
 #include <net/dsa.h>
 #include <linux/etherdevice.h>
 #include <linux/if_bridge.h>
+#include <linux/if_vlan.h>
+#include <linux/pcs/pcs.h>
 #include <asm/mach-rtl-otto/mach-rtl-otto.h>
 
 #include "rtl-otto.h"
+
+/* Ethernet header, two stacked VLAN tags (802.1ad QinQ) and FCS */
+#define RTLDSA_FRAME_OVERHEAD		(ETH_HLEN + 2 * VLAN_HLEN + ETH_FCS_LEN)
+/* Tail tag the DSA core adds to a frame on its way to the conduit */
+#define RTLDSA_TAG_OVERHEAD		4
 
 static const u8 ipv4_ll_mcast_addr_base[ETH_ALEN] = {
 	0x01, 0x00, 0x5e, 0x00, 0x00, 0x00
@@ -27,39 +34,17 @@ static void rtldsa_init_counters(struct rtl838x_switch_priv *priv);
 static void rtldsa_port_xstp_state_set(struct rtl838x_switch_priv *priv, int port,
 				       u8 state, u16 mst_slot);
 
-static void rtldsa_83xx_init_stats(struct rtl838x_switch_priv *priv)
+static void rtldsa_init_stats(struct rtl838x_switch_priv *priv)
 {
 	mutex_lock(&priv->reg_mutex);
 
-	/* Enable statistics module: all counters plus debug.
-	 * On RTL839x all counters are enabled by default
-	 */
-	if (priv->family_id == RTL8380_FAMILY_ID)
-		sw_w32_mask(0, 3, RTL838X_STAT_CTRL);
+	if (priv->r->stat_init)
+		priv->r->stat_init(priv);
 
 	/* Reset statistics counters */
 	sw_w32_mask(0, 1, priv->r->stat_rst);
 
 	mutex_unlock(&priv->reg_mutex);
-}
-
-static void rtldsa_enable_phy_polling(struct rtl838x_switch_priv *priv)
-{
-	u64 v = 0;
-
-	msleep(1000);
-	/* Enable all ports with a PHY, including the SFP-ports */
-	for (int i = 0; i < priv->r->cpu_port; i++) {
-		if (priv->ports[i].phy || priv->ports[i].pcs)
-			v |= BIT_ULL(i);
-	}
-
-	pr_info("%s: %16llx\n", __func__, v);
-	priv->r->set_port_reg_le(v, priv->r->smi_poll_ctrl);
-
-	/* PHY update complete, there is no global PHY polling enable bit on the 93xx */
-	if (priv->family_id == RTL8390_FAMILY_ID)
-		sw_w32_mask(0, BIT(7), RTL839X_SMI_GLB_CTRL);
 }
 
 /* DSA callbacks */
@@ -101,23 +86,14 @@ static void rtldsa_83xx_mc_pmasks_setup(struct rtl838x_switch_priv *priv)
 /* Initialize all VLANS */
 static void rtldsa_vlan_setup(struct rtl838x_switch_priv *priv)
 {
-	struct rtl838x_vlan_info info;
+	struct rtldsa_vlan_info info = {
+		.l2_tunnel_list_id = -1,
+	};
 
 	pr_info("In %s\n", __func__);
 
 	priv->r->vlan_profile_setup(0);
 	priv->r->vlan_profile_dump(priv, 0);
-
-	info.fid = 0;			/* Default Forwarding ID / MSTI */
-	info.hash_uc_fid = false;	/* Do not build the L2 lookup hash with FID, but VID */
-	info.hash_mc_fid = false;	/* Do the same for Multicast packets */
-	info.profile_id = 0;		/* Use default Vlan Profile 0 */
-	info.member_ports = 0;		/* Initially no port members */
-	if (priv->family_id == RTL9310_FAMILY_ID) {
-		info.if_id = 0;
-		info.multicast_grp_mask = 0;
-		info.l2_tunnel_list_id = -1;
-	}
 
 	/* Initialize normal VLANs 1-4095 */
 	for (int i = 1; i < MAX_VLANS; i++)
@@ -153,6 +129,12 @@ static void rtldsa_setup_lldp_traps(struct rtl838x_switch_priv *priv)
 		priv->r->set_receive_management_action(i, LLDP, TRAP2CPU);
 }
 
+static void rtldsa_setup_eapol_traps(struct rtl838x_switch_priv *priv)
+{
+	for (int i = 0; i < priv->r->cpu_port; i++)
+		priv->r->set_receive_management_action(i, EAPOL, TRAP2CPU);
+}
+
 static void rtldsa_port_set_salrn(struct rtl838x_switch_priv *priv,
 				  int port, bool enable)
 {
@@ -169,9 +151,6 @@ static int rtldsa_83xx_setup(struct dsa_switch *ds)
 
 	pr_debug("%s called\n", __func__);
 
-	/* Disable MAC polling the PHY so that we can start configuration */
-	priv->r->set_port_reg_le(0ULL, priv->r->smi_poll_ctrl);
-
 	for (int i = 0; i < ds->num_ports; i++)
 		priv->ports[i].enable = false;
 	priv->ports[priv->r->cpu_port].enable = true;
@@ -180,7 +159,7 @@ static int rtldsa_83xx_setup(struct dsa_switch *ds)
 	 * they will work in isolated mode (only traffic between port and CPU).
 	 */
 	for (int i = 0; i < priv->r->cpu_port; i++) {
-		if (priv->ports[i].phy || priv->ports[i].pcs) {
+		if (priv->ports[i].phy || priv->ports[i].has_pcs) {
 			priv->ports[i].pm = BIT_ULL(priv->r->cpu_port);
 			priv->r->traffic_set(i, BIT_ULL(i));
 		}
@@ -196,7 +175,7 @@ static int rtldsa_83xx_setup(struct dsa_switch *ds)
 	}
 
 	priv->r->print_matrix();
-	rtldsa_83xx_init_stats(priv);
+	rtldsa_init_stats(priv);
 	rtldsa_init_counters(priv);
 
 	rtldsa_83xx_mc_pmasks_setup(priv);
@@ -215,15 +194,8 @@ static int rtldsa_83xx_setup(struct dsa_switch *ds)
 	/* Make sure all frames sent to the switch's MAC are trapped to the CPU-port
 	 *  0: FWD, 1: DROP, 2: TRAP2CPU
 	 */
-	if (priv->family_id == RTL8380_FAMILY_ID)
-		sw_w32(0x2, RTL838X_SPCL_TRAP_SWITCH_MAC_CTRL);
-	else
-		sw_w32(0x2, RTL839X_SPCL_TRAP_SWITCH_MAC_CTRL);
+	sw_w32(0x2, priv->r->self_mac_trap_ctrl);
 
-	/* Enable MAC Polling PHY again */
-	rtldsa_enable_phy_polling(priv);
-	pr_debug("Please wait until PHY is settled\n");
-	msleep(1000);
 	priv->r->pie_init(priv);
 
 	return 0;
@@ -235,15 +207,6 @@ static int rtldsa_93xx_setup(struct dsa_switch *ds)
 
 	pr_info("%s called\n", __func__);
 
-	/* Disable MAC polling the PHY so that we can start configuration */
-	if (priv->family_id == RTL9300_FAMILY_ID)
-		sw_w32(0, RTL930X_SMI_POLL_CTRL);
-
-	if (priv->family_id == RTL9310_FAMILY_ID) {
-		sw_w32(0, RTL931X_SMI_PORT_POLLING_CTRL);
-		sw_w32(0, RTL931X_SMI_PORT_POLLING_CTRL + 4);
-	}
-
 	/* Disable all ports except CPU port */
 	for (int i = 0; i < ds->num_ports; i++)
 		priv->ports[i].enable = false;
@@ -253,7 +216,7 @@ static int rtldsa_93xx_setup(struct dsa_switch *ds)
 	 * they will work in isolated mode (only traffic between port and CPU).
 	 */
 	for (int i = 0; i < priv->r->cpu_port; i++) {
-		if (priv->ports[i].phy || priv->ports[i].pcs) {
+		if (priv->ports[i].phy || priv->ports[i].has_pcs) {
 			priv->ports[i].pm = BIT_ULL(priv->r->cpu_port);
 			priv->r->traffic_set(i, BIT_ULL(i));
 		}
@@ -261,13 +224,14 @@ static int rtldsa_93xx_setup(struct dsa_switch *ds)
 	priv->r->traffic_set(priv->r->cpu_port, BIT_ULL(priv->r->cpu_port));
 	priv->r->print_matrix();
 
-	/* TODO: Initialize statistics */
+	rtldsa_init_stats(priv);
 	rtldsa_init_counters(priv);
 
 	rtldsa_vlan_setup(priv);
 
 	rtldsa_setup_bpdu_traps(priv);
 	rtldsa_setup_lldp_traps(priv);
+	rtldsa_setup_eapol_traps(priv);
 
 	ds->configure_vlan_while_not_filtering = true;
 
@@ -276,27 +240,27 @@ static int rtldsa_93xx_setup(struct dsa_switch *ds)
 	rtldsa_port_set_salrn(priv, priv->r->cpu_port, false);
 	ds->assisted_learning_on_cpu_port = true;
 
-	rtldsa_enable_phy_polling(priv);
-
 	priv->r->pie_init(priv);
-
 	priv->r->led_init(priv);
 
 	return 0;
 }
 
-static struct phylink_pcs *rtldsa_phylink_mac_select_pcs(struct phylink_config *config,
-							 phy_interface_t interface)
+static int rtldsa_phylink_fill_available_pcs(struct phylink_config *config,
+					     struct phylink_pcs **available_pcs,
+					     unsigned int num_available_pcs)
 {
 	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct rtl838x_switch_priv *priv = dp->ds->priv;
 
-	return priv->ports[dp->index].pcs;
+	return fwnode_phylink_pcs_parse(of_fwnode_handle(dp->dn),
+					available_pcs, &num_available_pcs);
 }
 
 static void rtldsa_83xx_phylink_get_caps(struct dsa_switch *ds, int port,
 					 struct phylink_config *config)
 {
+	struct dsa_port *dp = dsa_to_port(ds, port);
+
 	/*
 	 * TODO: This needs to take into account the MAC to SERDES mapping and the
 	 * specific SoC capabilities. Right now we just assume all RTL83xx ports
@@ -311,11 +275,21 @@ static void rtldsa_83xx_phylink_get_caps(struct dsa_switch *ds, int port,
 	__set_bit(PHY_INTERFACE_MODE_INTERNAL, config->supported_interfaces);
 	__set_bit(PHY_INTERFACE_MODE_SGMII, config->supported_interfaces);
 	__set_bit(PHY_INTERFACE_MODE_QSGMII, config->supported_interfaces);
+
+	if (!fwnode_phylink_pcs_parse(of_fwnode_handle(dp->dn), NULL,
+				      &config->num_available_pcs)) {
+		config->fill_available_pcs = rtldsa_phylink_fill_available_pcs;
+		__set_bit(PHY_INTERFACE_MODE_SGMII, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_QSGMII, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_1000BASEX, config->pcs_interfaces);
+	}
 }
 
 static void rtldsa_93xx_phylink_get_caps(struct dsa_switch *ds, int port,
 					 struct phylink_config *config)
 {
+	struct dsa_port *dp = dsa_to_port(ds, port);
+
 	/*
 	 * TODO: This needs to take into account the MAC to SERDES mapping and the
 	 * specific SoC capabilities. Right now we just assume all RTL93xx ports
@@ -334,6 +308,18 @@ static void rtldsa_93xx_phylink_get_caps(struct dsa_switch *ds, int port,
 	__set_bit(PHY_INTERFACE_MODE_2500BASEX, config->supported_interfaces);
 	__set_bit(PHY_INTERFACE_MODE_USXGMII, config->supported_interfaces);
 	__set_bit(PHY_INTERFACE_MODE_10G_QXGMII, config->supported_interfaces);
+
+	if (!fwnode_phylink_pcs_parse(of_fwnode_handle(dp->dn), NULL,
+				      &config->num_available_pcs)) {
+		config->fill_available_pcs = rtldsa_phylink_fill_available_pcs;
+		__set_bit(PHY_INTERFACE_MODE_SGMII, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_QSGMII, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_1000BASEX, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_2500BASEX, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_USXGMII, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_10GBASER, config->pcs_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_10G_QXGMII, config->pcs_interfaces);
+	}
 }
 
 static void rtldsa_83xx_phylink_mac_config(struct phylink_config *config,
@@ -384,41 +370,20 @@ static void rtldsa_93xx_phylink_mac_config(struct phylink_config *config,
 	sw_w32(0, priv->r->mac_force_mode_ctrl(port));
 }
 
-static void rtldsa_83xx_phylink_mac_link_down(struct phylink_config *config,
-					      unsigned int mode,
-					      phy_interface_t interface)
+static void rtldsa_phylink_mac_link_down(struct phylink_config *config,
+					 unsigned int mode,
+					 phy_interface_t interface)
 {
 	struct dsa_port *dp = dsa_phylink_to_port(config);
 	struct rtl838x_switch_priv *priv = dp->ds->priv;
 	int port = dp->index;
-	int mask = 0;
 
 	/* Stop TX/RX to port */
 	sw_w32_mask(0x3, 0, priv->r->mac_port_ctrl(port));
 
 	/* No longer force link */
-	mask = RTL83XX_FORCE_EN | RTL83XX_FORCE_LINK_EN;
-	sw_w32_mask(mask, 0, priv->r->mac_force_mode_ctrl(port));
-}
-
-static void rtldsa_93xx_phylink_mac_link_down(struct phylink_config *config,
-					      unsigned int mode,
-					      phy_interface_t interface)
-{
-	struct dsa_port *dp = dsa_phylink_to_port(config);
-	struct rtl838x_switch_priv *priv = dp->ds->priv;
-	int port = dp->index;
-	u32 v = 0;
-
-	/* Stop TX/RX to port */
-	sw_w32_mask(0x3, 0, priv->r->mac_port_ctrl(port));
-
-	/* No longer force link */
-	if (priv->family_id == RTL9300_FAMILY_ID)
-		v = RTL930X_FORCE_EN | RTL930X_FORCE_LINK_EN;
-	else if (priv->family_id == RTL9310_FAMILY_ID)
-		v = RTL931X_FORCE_EN | RTL931X_FORCE_LINK_EN;
-	sw_w32_mask(v, 0, priv->r->mac_force_mode_ctrl(port));
+	sw_w32_mask(priv->r->mac_force_mode_mask, 0,
+		    priv->r->mac_force_mode_ctrl(port));
 }
 
 static void rtldsa_83xx_phylink_mac_link_up(struct phylink_config *config,
@@ -776,7 +741,7 @@ static void rtldsa_poll_counters(struct work_struct *work)
 							counters_work);
 
 	for (int port = 0; port < priv->r->cpu_port; port++) {
-		if (!priv->ports[port].phy && !priv->ports[port].pcs)
+		if (!priv->ports[port].phy && !priv->ports[port].has_pcs)
 			continue;
 
 		rtldsa_counters_lock(priv, port);
@@ -793,7 +758,7 @@ static void rtldsa_init_counters(struct rtl838x_switch_priv *priv)
 	struct rtldsa_counter_state *counters;
 
 	for (int port = 0; port < priv->r->cpu_port; port++) {
-		if (!priv->ports[port].phy && !priv->ports[port].pcs)
+		if (!priv->ports[port].phy && !priv->ports[port].has_pcs)
 			continue;
 
 		counters = &priv->ports[port].counters;
@@ -1111,6 +1076,79 @@ static void rtldsa_port_disable(struct dsa_switch *ds, int port)
 	priv->ports[port].enable = false;
 }
 
+static int rtldsa_port_max_mtu(struct dsa_switch *ds, int port)
+{
+	struct rtl838x_switch_priv *priv = ds->priv;
+
+	/* Families that cannot limit the frame length keep advertising the
+	 * ether_setup() default their ports always had.
+	 */
+	if (!priv->r->max_frame)
+		return ETH_DATA_LEN;
+
+	return priv->r->max_frame - RTLDSA_FRAME_OVERHEAD - RTLDSA_TAG_OVERHEAD;
+}
+
+static int rtldsa_largest_mtu(struct dsa_switch *ds, int port, int new_mtu)
+{
+	struct dsa_port *dp;
+	int mtu = new_mtu;
+
+	/* The MTU of the port being changed is written after this operation
+	 * runs, and not every user netdevice exists yet while probing.
+	 */
+	dsa_switch_for_each_user_port(dp, ds)
+		if (dp->index != port && dp->user)
+			mtu = max_t(int, mtu, dp->user->mtu);
+
+	return mtu;
+}
+
+static int rtldsa_port_change_mtu(struct dsa_switch *ds, int port, int new_mtu)
+{
+	struct rtl838x_switch_priv *priv = ds->priv;
+	int frame_size;
+
+	if (!priv->r->max_frame)
+		return -EOPNOTSUPP;
+
+	/* The ethernet driver owns the limits of the CPU port and programs them
+	 * from the conduit MTU, which carries the tagger overhead that the DSA
+	 * core leaves out of the value handed here.
+	 */
+	if (dsa_is_cpu_port(ds, port))
+		return 0;
+
+	/* new_mtu is the L2 payload size, but the MAC limit counts the whole
+	 * frame: the Ethernet header, up to two stacked VLAN tags (802.1ad
+	 * QinQ) and the FCS. The MAC TAG_INC bit is left as found, so VLAN tag
+	 * bytes are not counted twice. The tail tag towards the CPU port takes
+	 * the place of the FCS and needs no room of its own.
+	 */
+	if (priv->r->mac_max_len_reg) {
+		frame_size = new_mtu + RTLDSA_FRAME_OVERHEAD;
+
+		sw_w32_mask(RTLDSA_MAC_MAX_LEN_MASK,
+			    RTLDSA_MAC_MAX_LEN_VAL(frame_size),
+			    priv->r->mac_max_len_reg(port));
+
+		return 0;
+	}
+
+	/* One register for all ports, so it has to fit the largest of them */
+	frame_size = rtldsa_largest_mtu(ds, port, new_mtu) + RTLDSA_FRAME_OVERHEAD;
+
+	sw_w32_mask(RTLDSA_MAC_MAX_LEN_MASK, RTLDSA_MAC_MAX_LEN_VAL(frame_size),
+		    priv->r->mac_max_len_ctrl);
+
+	if (priv->r->mac_max_len_ctrl_dup)
+		sw_w32_mask(RTLDSA_MAC_MAX_LEN_MASK,
+			    RTLDSA_MAC_MAX_LEN_VAL(frame_size),
+			    priv->r->mac_max_len_ctrl_dup);
+
+	return 0;
+}
+
 static bool rtldsa_support_eee(struct dsa_switch *ds, int port)
 {
 	struct rtl838x_switch_priv *priv = ds->priv;
@@ -1410,6 +1448,7 @@ static int rtldsa_port_bridge_join(struct dsa_switch *ds, int port, struct dsa_b
 
 	/* reset to default flags for new net_bridge_port */
 	priv->ports[port].isolated = false;
+	priv->ports[port].cached_flags = 0;
 
 	mutex_lock(&priv->reg_mutex);
 
@@ -1452,52 +1491,31 @@ static void rtldsa_port_xstp_state_set(struct rtl838x_switch_priv *priv, int por
 				       u8 state, u16 mst_slot)
 				       __must_hold(&priv->reg_mutex)
 {
-	/* 838x/930x have 28 ports and 2 bit fields other devices 4 bit fields. */
-	int n = priv->r->cpu_port == RTL838X_CPU_PORT ? 2 : 4;
-	u32 port_state[4];
-	int index, bit;
-	int pos = port;
+	int hw_state;
 
-	/* Ports above or equal CPU port can never be configured */
 	if (port >= priv->r->cpu_port)
 		return;
 
-	/* For the RTL839x and following, the bits are left-aligned, 838x and 930x
-	 * have 64 bit fields, 839x and 931x have 128 bit fields
-	 */
-	if (priv->family_id == RTL8390_FAMILY_ID)
-		pos += 12;
-	if (priv->family_id == RTL9300_FAMILY_ID)
-		pos += 3;
-	if (priv->family_id == RTL9310_FAMILY_ID)
-		pos += 8;
-
-	index = n - (pos >> 4) - 1;
-	bit = (pos << 1) % 32;
-
-	priv->r->stp_get(priv, mst_slot, port, port_state);
-
-	pr_debug("Current state, port %d: %d\n", port, (port_state[index] >> bit) & 3);
-	port_state[index] &= ~(3 << bit);
-
 	switch (state) {
-	case BR_STATE_DISABLED: /* 0 */
-		port_state[index] |= (0 << bit);
+	case BR_STATE_DISABLED:
+		hw_state = 0;
 		break;
-	case BR_STATE_BLOCKING:  /* 4 */
-	case BR_STATE_LISTENING: /* 1 */
-		port_state[index] |= (1 << bit);
+	case BR_STATE_BLOCKING:
+	case BR_STATE_LISTENING:
+		hw_state = 1;
 		break;
-	case BR_STATE_LEARNING: /* 2 */
-		port_state[index] |= (2 << bit);
+	case BR_STATE_LEARNING:
+		hw_state = 2;
 		break;
-	case BR_STATE_FORWARDING: /* 3 */
-		port_state[index] |= (3 << bit);
+	case BR_STATE_FORWARDING:
+		hw_state = 3;
+		break;
 	default:
-		break;
+		dev_err(priv->dev, "stp state %d not supported\n", state);
+		return;
 	}
 
-	priv->r->stp_set(priv, mst_slot, port_state);
+	priv->r->stp_set(priv, mst_slot, port, hw_state);
 }
 
 void rtldsa_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
@@ -1583,7 +1601,7 @@ static int rtldsa_vlan_filtering(struct dsa_switch *ds, int port,
 static int rtldsa_vlan_prepare(struct dsa_switch *ds, int port,
 			       const struct switchdev_obj_port_vlan *vlan)
 {
-	struct rtl838x_vlan_info info;
+	struct rtldsa_vlan_info info;
 	struct rtl838x_switch_priv *priv = ds->priv;
 
 	priv->r->vlan_tables_read(0, &info);
@@ -1609,7 +1627,7 @@ static int rtldsa_vlan_add(struct dsa_switch *ds, int port,
 			   const struct switchdev_obj_port_vlan *vlan,
 			   struct netlink_ext_ack *extack)
 {
-	struct rtl838x_vlan_info info;
+	struct rtldsa_vlan_info info;
 	struct rtl838x_switch_priv *priv = ds->priv;
 	int err;
 
@@ -1681,7 +1699,7 @@ static int rtldsa_vlan_add(struct dsa_switch *ds, int port,
 static int rtldsa_vlan_del(struct dsa_switch *ds, int port,
 			   const struct switchdev_obj_port_vlan *vlan)
 {
-	struct rtl838x_vlan_info info;
+	struct rtldsa_vlan_info info;
 	struct rtl838x_switch_priv *priv = ds->priv;
 	u16 pvid;
 
@@ -1735,9 +1753,11 @@ void rtldsa_port_fast_age(struct dsa_switch *ds, int port)
 {
 	struct rtl838x_switch_priv *priv = ds->priv;
 
-	mutex_lock(&priv->reg_mutex);
 	if (!priv->r->fast_age)
-		priv->r->fast_age(priv, port, -1);
+		return;
+
+	mutex_lock(&priv->reg_mutex);
+	priv->r->fast_age(priv, port, -1);
 	mutex_unlock(&priv->reg_mutex);
 }
 
@@ -1760,7 +1780,7 @@ static int rtldsa_vlan_msti_set(struct dsa_switch *ds, struct dsa_bridge bridge,
 				const struct switchdev_vlan_msti *msti)
 {
 	struct rtl838x_switch_priv *priv = ds->priv;
-	struct rtl838x_vlan_info info;
+	struct rtldsa_vlan_info info;
 	u16 mst_slot_old;
 	int mst_slot;
 
@@ -2318,8 +2338,13 @@ static int rtldsa_port_pre_bridge_flags(struct dsa_switch *ds, int port,
 	pr_debug("%s: %d %lX\n", __func__, port, flags.val);
 	if (priv->r->enable_learning)
 		features |= BR_LEARNING;
+
 	if (priv->r->enable_flood)
 		features |= BR_FLOOD;
+
+	if (priv->r->enable_l2_new_sa_fwd)
+		features |= BR_PORT_LOCKED;
+
 	if (priv->r->enable_mcast_flood)
 		features |= BR_MCAST_FLOOD;
 	if (priv->r->enable_bcast_flood)
@@ -2330,30 +2355,80 @@ static int rtldsa_port_pre_bridge_flags(struct dsa_switch *ds, int port,
 	return 0;
 }
 
+/* dsa_port_fast_age() is DSA internal, repeat its bridge notification here. */
+static void rtldsa_port_fast_age_notify(struct dsa_port *dp)
+{
+	struct net_device *brport_dev = dsa_port_to_bridge_port(dp);
+	struct switchdev_notifier_fdb_info info = {
+		.vid = 0, /* all VLANs */
+	};
+
+	rtldsa_port_fast_age(dp->ds, dp->index);
+
+	if (!brport_dev)
+		return;
+
+	call_switchdev_notifiers(SWITCHDEV_FDB_FLUSH_TO_BRIDGE, brport_dev,
+				 &info.info, NULL);
+}
+
 static int rtldsa_port_bridge_flags(struct dsa_switch *ds, int port,
 				    struct switchdev_brport_flags flags,
 				    struct netlink_ext_ack *extack)
 {
 	struct rtl838x_switch_priv *priv = ds->priv;
+	struct dsa_port *dp = dsa_to_port(ds, port);
+	enum rtldsa_flood_type new_sa_fwd;
+	unsigned long cached_flags;
 
 	pr_debug("%s: %d %lX\n", __func__, port, flags.val);
-	if (priv->r->enable_learning && (flags.mask & BR_LEARNING))
-		priv->r->enable_learning(port, !!(flags.val & BR_LEARNING));
 
-	if (priv->r->enable_flood && (flags.mask & BR_FLOOD))
-		priv->r->enable_flood(port, !!(flags.val & BR_FLOOD));
+	priv->ports[port].cached_flags &= ~flags.mask;
+	priv->ports[port].cached_flags |= flags.val & flags.mask;
 
-	if (priv->r->enable_mcast_flood && (flags.mask & BR_MCAST_FLOOD))
-		priv->r->enable_mcast_flood(port, !!(flags.val & BR_MCAST_FLOOD));
+	cached_flags = priv->ports[port].cached_flags;
 
-	if (priv->r->enable_bcast_flood && (flags.mask & BR_BCAST_FLOOD))
-		priv->r->enable_bcast_flood(port, !!(flags.val & BR_BCAST_FLOOD));
+	if (cached_flags & BR_PORT_LOCKED) {
+		/* A locked port must not learn addresses on its own, and the
+		 * entries it learned before are no longer authorized.
+		 */
+		rtldsa_port_set_salrn(priv, port, false);
+
+		if (flags.mask & BR_PORT_LOCKED)
+			rtldsa_port_fast_age_notify(dp);
+	} else {
+		rtldsa_port_set_salrn(priv, port, !!(cached_flags & BR_LEARNING));
+	}
+
+	priv->ports[port].flood_type = (cached_flags & BR_FLOOD) ?
+				       RTLDSA_FLOOD_TYPE_FORWARD :
+				       RTLDSA_FLOOD_TYPE_DROP;
+
+	if (priv->r->enable_flood)
+		priv->r->enable_flood(port, priv->ports[port].flood_type);
+
+	/* Trap frames with an unknown source address on a locked port to the
+	 * CPU, so that an authenticator can inspect them and add an FDB entry.
+	 */
+	new_sa_fwd = (cached_flags & BR_PORT_LOCKED) ? RTLDSA_FLOOD_TYPE_TRAP2CPU :
+						       RTLDSA_FLOOD_TYPE_FORWARD;
+
+	if (priv->r->enable_l2_new_sa_fwd)
+		priv->r->enable_l2_new_sa_fwd(port, new_sa_fwd);
+
+	if (priv->r->enable_learning)
+		priv->r->enable_learning(port, !!(cached_flags & BR_LEARNING));
+
+	if (priv->r->enable_mcast_flood)
+		priv->r->enable_mcast_flood(port, !!(cached_flags & BR_MCAST_FLOOD));
+
+	if (priv->r->enable_bcast_flood)
+		priv->r->enable_bcast_flood(port, !!(cached_flags & BR_BCAST_FLOOD));
 
 	if (flags.mask & BR_ISOLATED) {
-		struct dsa_port *dp = dsa_to_port(ds, port);
 		struct net_device *bridge_dev = dsa_port_bridge_dev_get(dp);
 
-		priv->ports[port].isolated = !!(flags.val & BR_ISOLATED);
+		priv->ports[port].isolated = !!(cached_flags & BR_ISOLATED);
 
 		mutex_lock(&priv->reg_mutex);
 		rtldsa_update_port_member(priv, port, bridge_dev, true);
@@ -2614,9 +2689,8 @@ unlock:
 }
 
 const struct phylink_mac_ops rtldsa_83xx_phylink_mac_ops = {
-	.mac_select_pcs		= rtldsa_phylink_mac_select_pcs,
 	.mac_config		= rtldsa_83xx_phylink_mac_config,
-	.mac_link_down		= rtldsa_83xx_phylink_mac_link_down,
+	.mac_link_down		= rtldsa_phylink_mac_link_down,
 	.mac_link_up		= rtldsa_83xx_phylink_mac_link_up,
 };
 
@@ -2638,6 +2712,9 @@ const struct dsa_switch_ops rtldsa_83xx_switch_ops = {
 
 	.port_enable		= rtldsa_port_enable,
 	.port_disable		= rtldsa_port_disable,
+
+	.port_change_mtu	= rtldsa_port_change_mtu,
+	.port_max_mtu		= rtldsa_port_max_mtu,
 
 	.support_eee		= rtldsa_support_eee,
 	.set_mac_eee		= rtldsa_set_mac_eee,
@@ -2674,9 +2751,8 @@ const struct dsa_switch_ops rtldsa_83xx_switch_ops = {
 };
 
 const struct phylink_mac_ops rtldsa_93xx_phylink_mac_ops = {
-	.mac_select_pcs		= rtldsa_phylink_mac_select_pcs,
 	.mac_config		= rtldsa_93xx_phylink_mac_config,
-	.mac_link_down		= rtldsa_93xx_phylink_mac_link_down,
+	.mac_link_down		= rtldsa_phylink_mac_link_down,
 	.mac_link_up		= rtldsa_93xx_phylink_mac_link_up,
 };
 
@@ -2698,6 +2774,9 @@ const struct dsa_switch_ops rtldsa_93xx_switch_ops = {
 
 	.port_enable		= rtldsa_port_enable,
 	.port_disable		= rtldsa_port_disable,
+
+	.port_change_mtu	= rtldsa_port_change_mtu,
+	.port_max_mtu		= rtldsa_port_max_mtu,
 
 	.support_eee		= rtldsa_support_eee,
 	.set_mac_eee		= rtldsa_set_mac_eee,
