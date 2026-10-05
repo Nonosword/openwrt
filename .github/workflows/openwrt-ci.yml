@@ -8,6 +8,9 @@
 name: OpenWrt-CI
 
 on:
+  schedule:
+    # Monday 04:17 Asia/Shanghai = Sunday 20:17 UTC
+    - cron: '17 20 * * 0'
   repository_dispatch:
   workflow_dispatch:
     inputs:
@@ -48,13 +51,13 @@ jobs:
 
   build_openwrt:
 
-    name: Build ${{ github.event.inputs.device }}_${{ github.event.inputs.kernel }}
+    name: Build ${{ inputs.device || github.event.client_payload.device || 'r4s' }}_${{ inputs.kernel || github.event.client_payload.kernel || 'regular_kernel' }}
     runs-on: ubuntu-22.04
     env:
-      DEVICE: ${{ github.event.inputs.device }}
-      KERNEL: ${{ github.event.inputs.kernel }}
-      BRANCH: ${{ github.event.inputs.branch }}
-      WORKCHAIN: ${{ github.event.inputs.workchain }}
+      DEVICE: ${{ inputs.device || github.event.client_payload.device || 'r4s' }}
+      KERNEL: ${{ inputs.kernel || github.event.client_payload.kernel || 'regular_kernel' }}
+      BRANCH: ${{ inputs.branch || github.event.client_payload.branch || 'openwrt-25.12' }}
+      WORKCHAIN: ${{ inputs.workchain || github.event.client_payload.workchain || 'MainNet' }}
 
     steps:
       - name: Space cleanup and Initialization environment
@@ -76,7 +79,9 @@ jobs:
       - name: Checkout OpenWrt
         uses: actions/checkout@v6
         with:
+          repository: openwrt/openwrt
           ref: ${{ env.BRANCH }}
+          persist-credentials: false
   
       - name: Update feeds
         run: |
@@ -162,8 +167,12 @@ jobs:
 
       - name: Read kernel version
         run: |
-          grep 'CONFIG_LINUX_' .config
-          echo "vKERNEL=$(grep 'CONFIG_LINUX_' .config | cut -d'_' -f 3,4 | cut -d'=' -f 1)" >> $GITHUB_ENV
+          kernel_version="$(sed -nE 's/^CONFIG_LINUX_([0-9]+)_([0-9]+)=y$/\1.\2/p' .config)"
+          if [[ ! "$kernel_version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not determine a unique selected kernel version"
+            exit 1
+          fi
+          echo "vKERNEL=$kernel_version" >> "$GITHUB_ENV"
 
       - name: Upload buildinfo
         uses: actions/upload-artifact@v6
