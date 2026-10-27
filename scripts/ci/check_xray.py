@@ -15,6 +15,27 @@ def version(value):
 
 def check(root, phase):
     recipe = root / "feeds/passwall_packages/xray-core"
+    if phase == "prepare":
+        # Xray 26.10.21 requires Go 1.27; openwrt-25.12 defaults to 1.26.
+        # The versioned dependency also selects GO_HOST_VERSION in golang-values.mk.
+        path = recipe / "Makefile"
+        text = path.read_text()
+        match = re.search(r"^PKG_BUILD_DEPENDS\s*:?=\s*(.*?)\s*$", text, re.M)
+        if not match:
+            raise ValueError("Cannot determine Xray host build dependencies")
+        depends = match[1].split()
+        if "golang/host" in depends:
+            depends[depends.index("golang/host")] = "golang1.27/host"
+        versions = [re.fullmatch(r"golang(\d+\.\d+)/host", item) for item in depends]
+        versions = [item[1] for item in versions if item]
+        if len(versions) != 1 or tuple(map(int, versions[0].split("."))) < (1, 27):
+            raise ValueError(f"Xray needs a versioned Go >=1.27 dependency: {depends}")
+        compiler = root / f"feeds/packages/lang/golang/golang{versions[0]}/Makefile"
+        if not compiler.is_file():
+            raise ValueError(f"Selected Go compiler is missing: {compiler}")
+        path.write_text(text[:match.start()] + "PKG_BUILD_DEPENDS:=" + " ".join(depends) + text[match.end():])
+        print(f"Selected Xray-only host dependency: golang{versions[0]}/host")
+        return
     selected = list((root / "package/feeds").glob("*/xray-core"))
     if len(selected) != 1 or selected[0].resolve() != recipe.resolve():
         raise ValueError(f"Expected only passwall_packages/xray-core; selected: {selected}")
@@ -48,7 +69,7 @@ def check(root, phase):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("feeds", "config", "image"))
+    parser.add_argument("phase", choices=("prepare", "feeds", "config", "image"))
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args()
     try:

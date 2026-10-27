@@ -95,6 +95,8 @@ jobs:
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/extra_feeds
           cat extra_feeds >> feeds.conf.default
           ./scripts/feeds update -a
+          python3 .build-checks/scripts/ci/check_xray.py prepare
+          ./scripts/feeds update -i passwall_packages
           # Select this provider before install-all sees the older packages feed.
           ./scripts/feeds install -p passwall_packages xray-core
           ./scripts/feeds install -a

@@ -95,6 +95,26 @@ class XrayBuildTests(unittest.TestCase):
         self.assertTrue(self.link.is_symlink())
         self.assertFalse(old.exists(), "install-all must not reintroduce the old provider")
 
+    def test_xray_only_go_dependency(self):
+        path = "feeds/passwall_packages/xray-core/Makefile"
+        self.write(path, "PKG_BUILD_DEPENDS:=golang/host other/host\ninclude golang-package.mk\n")
+        self.write("feeds/packages/lang/golang/golang1.27/Makefile", "# compiler\n")
+        self.write("feeds/packages/lang/golang/golang-values.mk", "GO_DEFAULT_VERSION:=1.26\n")
+        checks.check(self.root, "prepare")
+        self.assertIn("PKG_BUILD_DEPENDS:=golang1.27/host other/host\n", (self.root / path).read_text())
+        self.assertEqual((self.root / "feeds/packages/lang/golang/golang-values.mk").read_text(), "GO_DEFAULT_VERSION:=1.26\n")
+        checks.check(self.root, "prepare")  # idempotent
+
+    def test_missing_go_compiler(self):
+        self.write("feeds/passwall_packages/xray-core/Makefile", "PKG_BUILD_DEPENDS:=golang/host\n")
+        with self.assertRaises(ValueError): checks.check(self.root, "prepare")
+
+    def test_preserve_newer_explicit_go(self):
+        self.write("feeds/passwall_packages/xray-core/Makefile", "PKG_BUILD_DEPENDS:=golang1.28/host\n")
+        self.write("feeds/packages/lang/golang/golang1.28/Makefile", "# compiler\n")
+        checks.check(self.root, "prepare")
+        self.assertIn("golang1.28/host", (self.root / "feeds/passwall_packages/xray-core/Makefile").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
