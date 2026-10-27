@@ -82,13 +82,23 @@ jobs:
           repository: openwrt/openwrt
           ref: ${{ env.BRANCH }}
           persist-credentials: false
+
+      - name: Checkout build checks
+        uses: actions/checkout@v6
+        with:
+          path: .build-checks
+          sparse-checkout: scripts/ci
+          persist-credentials: false
   
       - name: Update feeds
         run: |
           wget https://raw.githubusercontent.com/Nonosword/library/main/openwrt/extra_feeds
           cat extra_feeds >> feeds.conf.default
           ./scripts/feeds update -a
+          # Select this provider before install-all sees the older packages feed.
+          ./scripts/feeds install -p passwall_packages xray-core
           ./scripts/feeds install -a
+          python3 .build-checks/scripts/ci/check_xray.py feeds
 
       - name: Fetch library configuration
         run: |
@@ -113,6 +123,7 @@ jobs:
           sed -i 's/^[ \t]*//g' ./.config
           cat .config
           make defconfig
+          python3 .build-checks/scripts/ci/check_xray.py config
 
       - name: Restore OpenWrt caches
         uses: actions/cache@v5
@@ -152,6 +163,9 @@ jobs:
           du -h --max-depth=1 ./ --exclude=build_dir --exclude=bin
           du -h --max-depth=1 ./build_dir
           du -h --max-depth=1 ./bin
+
+      - name: Verify Xray in firmware manifests
+        run: python3 .build-checks/scripts/ci/check_xray.py image
 
       - name: Prepare artifact
         run: |

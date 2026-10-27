@@ -1,0 +1,14 @@
+name: Xray build checks
+on:
+  pull_request:
+    paths: ['.github/workflows/openwrt-ci.yml', '.github/workflows/xray-build-checks.yml', 'scripts/ci/**', 'tests/test_xray_build.py']
+  push:
+    paths: ['.github/workflows/openwrt-ci.yml', '.github/workflows/xray-build-checks.yml', 'scripts/ci/**', 'tests/test_xray_build.py']
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 tests/test_xray_build.py
